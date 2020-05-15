@@ -53,6 +53,7 @@ struct argument args;
 struct nbody* h_bodies;
 struct nbody* d_bodies;
 float* heat_map;
+float* d_heat_map;
 
 __global__ void test(struct nbody* d_bodies){
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -103,12 +104,16 @@ int main(int argc, char* argv[]) {
 	args = load_args(argc, argv);
 	if (args.m == OPENMP)
 		omp_set_num_threads(omp_get_max_threads());
-	//omp_set_num_threads(10);
 
 	//Allocate any heap memory
 	int size = sizeof(struct nbody) * args.n;
-	h_bodies = (struct nbody*) malloc(size);
+	h_bodies = (struct nbody*) malloc(sizeof(struct nbody) * args.n);
 	heat_map = (float*)malloc(sizeof(float) * args.d * args.d);
+	if (args.m == CUDA) {
+		cudaMalloc((void**)&d_bodies, sizeof(struct nbody) * args.n);
+		// TODO: heat map
+		cudaMalloc((void**)&d_heat_map, sizeof(float) * args.d * args.d);
+	}
 
 	//Depending on program arguments, either read initial data from file or generate random data.
 	if (args.input_file != NULL)
@@ -118,41 +123,65 @@ int main(int argc, char* argv[]) {
 
 	//Allocate CUDA memory & copy data
 	if (args.m == CUDA) {
-		cudaMalloc((void**)&d_bodies, size);
-		cudaMemcpy(d_bodies, h_bodies, size, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_bodies, h_bodies, sizeof(struct nbody) * args.n, cudaMemcpyHostToDevice);
 		checkCUDAErrors("Input transfer to device");
-
-		//dim3 blocksPerGrid(8, 1, 1);
-		//dim3 threadsPerBlock(128, 1, 1);
-
-		//test << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
-		//compute_volocity1 << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
-		//cudaThreadSynchronize();
-		//update_location1 << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
-		//cudaThreadSynchronize();
 	}
 
 
 	//Depending on program arguments, either configure and start the visualiser or perform a fixed number of simulation steps (then output the timing results).
 	//args.visualisation = TRUE;
 	if (args.visualisation == TRUE) {
-		initViewer(args.n, args.d, args.m, &step);
-		setNBodyPositions(h_bodies);
-		setHistogramData(heat_map);
+		//initViewer(args.n, args.d, args.m, &step);
+		initViewer(args.n, args.d, args.m, (*step));
+		if (args.m == CUDA) {
+			setNBodyPositions(d_bodies);
+			//setHistogramData(d_heat_map);
+			setActivityMapData(d_heat_map);
+		}
+		else {
+			setNBodyPositions(h_bodies);
+			//setHistogramData(d_heat_map);
+			setActivityMapData(heat_map);
+		}
 		startVisualisationLoop();
 	}
 	else {
-		clock_t tic = clock();
-		//Sleep(123456);
-		step();
-		clock_t toc = clock();
-		int seconds = (toc - tic) / CLOCKS_PER_SEC;
-		int milliseconds = (toc - tic - seconds * CLOCKS_PER_SEC);
-		printf("Execution time %d seconds %d milliseconds\n", seconds, milliseconds);
+		if (args.m == CUDA) {
+			cudaEvent_t start, stop;
+			float milliseconds = 0;
+			cudaEventCreate(&start);
+			cudaEventCreate(&stop);
+
+			cudaEventRecord(start);
+			step();
+			cudaEventRecord(stop);
+			cudaEventSynchronize(stop);
+
+			cudaEventElapsedTime(&milliseconds, start, stop);
+			int seconds = milliseconds / CLOCKS_PER_SEC;
+			milliseconds = (milliseconds - seconds * CLOCKS_PER_SEC);
+			printf("Execution time %d seconds %d milliseconds\n", seconds, milliseconds);
+			cudaEventDestroy(start);
+			cudaEventDestroy(stop);
+		}
+		else {
+			clock_t tic = clock();
+			step();
+			clock_t toc = clock();
+			int seconds = (toc - tic) / CLOCKS_PER_SEC;
+			int milliseconds = (toc - tic - seconds * CLOCKS_PER_SEC);
+			printf("Execution time %d seconds %d milliseconds\n", seconds, milliseconds);
+		}
 	}
 
 	free(h_bodies);
 	free(heat_map);
+	if (args.m == CUDA) {
+		cudaFree(d_bodies);
+		cudaFree(d_heat_map);
+		checkCUDAErrors("CUDA cleanup");
+	}
+
 	return 0;
 }
 
