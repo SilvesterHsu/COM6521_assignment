@@ -47,6 +47,8 @@ void compute_volocity(struct nbody* bodies, float time_step, struct argument arg
 void update_location(struct nbody* bodies, float time_step, struct argument args);
 void update_heat_map(float* heat_map, struct nbody* bodies, struct argument args);
 
+void checkCUDAErrors(const char* msg);
+
 struct argument args;
 struct nbody* h_bodies;
 struct nbody* d_bodies;
@@ -57,6 +59,41 @@ __global__ void test(struct nbody* d_bodies){
 	printf("");
 }
 
+__device__ struct point calculate_single_body_acceleration1(struct nbody* bodies, int N) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	struct point acceleration = { 0,0 };
+	struct nbody* target_bodies = bodies + index;
+	for (unsigned int i = 0; i < N; i++) {
+		struct nbody* external_body = bodies + i;
+		if (i != index) {
+			float x_diff = external_body->x - target_bodies->x;
+			float y_diff = external_body->y - target_bodies->y;
+			//float r = sqrt((double)x_diff * x_diff + (double)y_diff * y_diff);
+			double r = (double)x_diff * x_diff + (double)y_diff * y_diff;
+			float temp = G * external_body->m / (float)(sqrt((r + SOFTENING * SOFTENING)) * (r + SOFTENING * SOFTENING));
+			//float temp = G_const * external_body->m / (float)pow(((double)r + SOFTENING_square), 3.0 / 2);
+			acceleration.x += temp * x_diff;
+			acceleration.y += temp * y_diff;
+			printf("");
+			}
+		}
+	return acceleration;
+}
+
+__global__ void compute_volocity1(struct nbody* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	struct point acceleration = calculate_single_body_acceleration1(bodies,1024);
+	struct nbody* target_bodies = bodies + index;
+	target_bodies->vx += acceleration.x * dt;
+	target_bodies->vy += acceleration.y * dt;
+}
+
+__global__ void update_location1(struct nbody* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	struct nbody* target_bodies = bodies + index;
+	target_bodies->x += target_bodies->vx * dt;
+	target_bodies->y += target_bodies->vy * dt;
+}
 
 
 int main(int argc, char* argv[]) {
@@ -85,11 +122,14 @@ int main(int argc, char* argv[]) {
 		cudaMemcpy(d_bodies, h_bodies, size, cudaMemcpyHostToDevice);
 		checkCUDAErrors("Input transfer to device");
 
-		dim3 blocksPerGrid(8, 1, 1);
-		dim3 threadsPerBlock(128, 1, 1);
+		//dim3 blocksPerGrid(8, 1, 1);
+		//dim3 threadsPerBlock(128, 1, 1);
 
-		test << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
-		cudaThreadSynchronize();
+		//test << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
+		//compute_volocity1 << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
+		//cudaThreadSynchronize();
+		//update_location1 << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
+		//cudaThreadSynchronize();
 	}
 
 
@@ -137,7 +177,11 @@ void step(void)
 	for (unsigned int i = 0; i < args.iter; i++) {
 		compute_volocity(h_bodies, time_step, args);
 		#pragma omp barrier
+		if (args.m == CUDA)
+			cudaThreadSynchronize();
 		update_location(h_bodies, time_step, args);
+		if (args.m == CUDA)
+			cudaThreadSynchronize();
 		if (args.visualisation == TRUE)
 			update_heat_map(heat_map, h_bodies, args);
 	}
@@ -410,6 +454,11 @@ void compute_volocity(struct nbody* bodies, float time_step, struct argument arg
 			(bodies + i)->vy += acceleration.y * time_step;
 		}
 	}
+	else if (args.m == CUDA) {
+		dim3 blocksPerGrid(8, 1, 1);
+		dim3 threadsPerBlock(128, 1, 1);
+		compute_volocity1 << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
+	}
 	//double t = omp_get_wtime() - tic;
 	//printf("");
 }
@@ -442,6 +491,11 @@ void update_location(struct nbody* bodies, float time_step, struct argument args
 			(bodies + i)->x += (bodies + i)->vx * time_step;
 			(bodies + i)->y += (bodies + i)->vy * time_step;
 		}
+	}
+	else if (args.m == CUDA) {
+		dim3 blocksPerGrid(8, 1, 1);
+		dim3 threadsPerBlock(128, 1, 1);
+		update_location1 << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
 	}
 	//double t = omp_get_wtime() - tic;
 	//printf("");

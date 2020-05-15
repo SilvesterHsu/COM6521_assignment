@@ -2,7 +2,7 @@
 #ifndef __NBODY_HEADER__
 #define __NBODY_HEADER__
 
-#define G			1.0f		//gravitational constant (not the actual value of G, a value of G used to avoid issues with numeric precision)
+#define G			9.8f		//gravitational constant (not the actual value of G, a value of G used to avoid issues with numeric precision)
 #define dt			0.01f		//time step
 #define SOFTENING	2.0f		//softening parameter to help with numerical instability
 
