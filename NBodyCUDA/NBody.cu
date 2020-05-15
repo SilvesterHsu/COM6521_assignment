@@ -270,7 +270,7 @@ struct argument load_args(int argc, char* argv[]) {
 			args.n = atoi(argv[1]); // N
 			args.d = atoi(argv[2]); // D
 		}
-		if (strcmp(argv[3], "CUDA") != 0 && strcmp(argv[3], "CPU") != 0)
+		if (strcmp(argv[3], "CUDA") != 0 && strcmp(argv[3], "CPU") != 0 && strcmp(argv[3], "OPENMP") != 0)
 			raise_error("Error: mode should be CPU or OPENMP", TRUE, 1);
 		else {
 			if (strcmp(argv[3], "CPU") == 0)

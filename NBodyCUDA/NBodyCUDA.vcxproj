@@ -99,7 +99,7 @@ copy "$(CudaToolkitBinDir)\cudart*.dll" "$(OutDir)"</Command>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <CudaCompile Include="NBody.c" />
+    <CudaCompile Include="NBody.cu" />
     <CudaCompile Include="NBodyVisualiser.cu" />
   </ItemGroup>
   <ItemGroup>
