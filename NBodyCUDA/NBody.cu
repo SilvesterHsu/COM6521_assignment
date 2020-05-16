@@ -13,6 +13,7 @@
 #define USER_NAME "elt18sx"		//replace with your username
 
 #define FILE_CACHE_SIZE 255		//cache used to store one line content while reading file
+#define THREADS_PER_BLOCK 1024
 
 struct argument {
 	// Arguments to store essential parameters, such
@@ -55,47 +56,60 @@ struct nbody* d_bodies;
 float* heat_map;
 float* d_heat_map;
 
-__global__ void test(struct nbody* d_bodies){
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	printf("");
-}
-
-__device__ struct point calculate_single_body_acceleration1(struct nbody* bodies, int N) {
+__device__ struct point calculate_single_body_acceleration_CUDA(struct nbody* bodies, int N) {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	struct point acceleration = { 0,0 };
-	struct nbody* target_bodies = bodies + index;
-	for (unsigned int i = 0; i < N; i++) {
-		struct nbody* external_body = bodies + i;
-		if (i != index) {
-			float x_diff = external_body->x - target_bodies->x;
-			float y_diff = external_body->y - target_bodies->y;
-			//float r = sqrt((double)x_diff * x_diff + (double)y_diff * y_diff);
-			double r = (double)x_diff * x_diff + (double)y_diff * y_diff;
-			float temp = G * external_body->m / (float)(sqrt((r + SOFTENING * SOFTENING)) * (r + SOFTENING * SOFTENING));
-			//float temp = G_const * external_body->m / (float)pow(((double)r + SOFTENING_square), 3.0 / 2);
-			acceleration.x += temp * x_diff;
-			acceleration.y += temp * y_diff;
-			printf("");
+	if (index < N) {
+		struct nbody* target_bodies = bodies + index;
+		for (unsigned int i = 0; i < N; i++) {
+			struct nbody* external_body = bodies + i;
+			if (i != index) {
+				float x_diff = external_body->x - target_bodies->x;
+				float y_diff = external_body->y - target_bodies->y;
+				//float r = sqrt((double)x_diff * x_diff + (double)y_diff * y_diff);
+				double r = (double)x_diff * x_diff + (double)y_diff * y_diff;
+				float temp = G * external_body->m / (float)(sqrt((r + SOFTENING * SOFTENING)) * (r + SOFTENING * SOFTENING));
+				//float temp = G_const * external_body->m / (float)pow(((double)r + SOFTENING_square), 3.0 / 2);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
 			}
 		}
+	}
 	return acceleration;
 }
 
-__global__ void compute_volocity1(struct nbody* bodies) {
+__global__ void compute_volocity_CUDA(struct nbody* bodies, int N) {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	struct point acceleration = calculate_single_body_acceleration1(bodies,1024);
-	struct nbody* target_bodies = bodies + index;
-	target_bodies->vx += acceleration.x * dt;
-	target_bodies->vy += acceleration.y * dt;
+	if (index < N) {
+		struct point acceleration = calculate_single_body_acceleration_CUDA(bodies,N);
+		struct nbody* target_bodies = bodies + index;
+		target_bodies->vx += acceleration.x * dt;
+		target_bodies->vy += acceleration.y * dt;
+	}
 }
 
-__global__ void update_location1(struct nbody* bodies) {
+__global__ void update_location_CUDA(struct nbody* bodies, int N) {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	struct nbody* target_bodies = bodies + index;
-	target_bodies->x += target_bodies->vx * dt;
-	target_bodies->y += target_bodies->vy * dt;
+	if (index < N) {
+		struct nbody* target_bodies = bodies + index;
+		target_bodies->x += target_bodies->vx * dt;
+		target_bodies->y += target_bodies->vy * dt;
+	}
 }
 
+__global__ void update_heat_map_CUDA(struct nbody* bodies, float* heat_map, unsigned int N, unsigned int D)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		float grid_length = 1.0 / D;
+		struct point body_location = { (bodies + index)->x, (bodies + index)->y };
+		if (!(body_location.x < 0 || body_location.x>1 || body_location.y < 0 || body_location.y>1)) {
+			int row = (int)(body_location.x / grid_length);
+			int line = (int)(body_location.y / grid_length);
+			atomicAdd((heat_map + line * D + row), (N * D <= 1000) ? (1.0 / N) : (1.0 * D / N));
+		}
+	}
+}
 
 int main(int argc, char* argv[]) {
 	//Processes the command line arguments
@@ -148,7 +162,7 @@ int main(int argc, char* argv[]) {
 	else {
 		if (args.m == CUDA) {
 			cudaEvent_t start, stop;
-			float milliseconds = 0;
+			float milliseconds_total = 0;
 			cudaEventCreate(&start);
 			cudaEventCreate(&stop);
 
@@ -157,9 +171,12 @@ int main(int argc, char* argv[]) {
 			cudaEventRecord(stop);
 			cudaEventSynchronize(stop);
 
-			cudaEventElapsedTime(&milliseconds, start, stop);
-			int seconds = milliseconds / CLOCKS_PER_SEC;
-			milliseconds = (milliseconds - seconds * CLOCKS_PER_SEC);
+			//cudaMemcpy(h_bodies, d_bodies, sizeof(struct nbody) * args.n, cudaMemcpyDeviceToHost);
+			//checkCUDAErrors("Device transfer to host");
+
+			cudaEventElapsedTime(&milliseconds_total, start, stop);
+			int seconds = milliseconds_total / CLOCKS_PER_SEC;
+			int milliseconds = (milliseconds_total - seconds * CLOCKS_PER_SEC);
 			printf("Execution time %d seconds %d milliseconds\n", seconds, milliseconds);
 			cudaEventDestroy(start);
 			cudaEventDestroy(stop);
@@ -203,16 +220,27 @@ void step(void)
 	--------------------------------------------------------*/
 
 	float time_step = dt;
+	int block = (args.n % THREADS_PER_BLOCK == 0) ? args.n / THREADS_PER_BLOCK : args.n / THREADS_PER_BLOCK + 1;
 	for (unsigned int i = 0; i < args.iter; i++) {
-		compute_volocity(h_bodies, time_step, args);
-		#pragma omp barrier
-		if (args.m == CUDA)
+		if (args.m == CUDA) {
+			compute_volocity_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies,args.n);
 			cudaThreadSynchronize();
-		update_location(h_bodies, time_step, args);
-		if (args.m == CUDA)
+			update_location_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies,args.n);
 			cudaThreadSynchronize();
-		if (args.visualisation == TRUE)
-			update_heat_map(heat_map, h_bodies, args);
+			if (args.visualisation == TRUE) {
+				cudaMemset(d_heat_map, 0, sizeof(float) * args.d * args.d);
+				update_heat_map_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies, d_heat_map, args.n, args.d);
+			}
+		}
+		else {
+			compute_volocity(h_bodies, time_step, args);
+			#pragma omp barrier
+			update_location(h_bodies, time_step, args);
+			if (args.visualisation == TRUE) {
+				memset(heat_map, 0, sizeof(float) * args.d * args.d);
+				update_heat_map(heat_map, h_bodies, args);
+			}
+		}
 	}
 }
 
@@ -483,11 +511,6 @@ void compute_volocity(struct nbody* bodies, float time_step, struct argument arg
 			(bodies + i)->vy += acceleration.y * time_step;
 		}
 	}
-	else if (args.m == CUDA) {
-		dim3 blocksPerGrid(8, 1, 1);
-		dim3 threadsPerBlock(128, 1, 1);
-		compute_volocity1 << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
-	}
 	//double t = omp_get_wtime() - tic;
 	//printf("");
 }
@@ -520,11 +543,6 @@ void update_location(struct nbody* bodies, float time_step, struct argument args
 			(bodies + i)->x += (bodies + i)->vx * time_step;
 			(bodies + i)->y += (bodies + i)->vy * time_step;
 		}
-	}
-	else if (args.m == CUDA) {
-		dim3 blocksPerGrid(8, 1, 1);
-		dim3 threadsPerBlock(128, 1, 1);
-		update_location1 << < blocksPerGrid, threadsPerBlock >> > (d_bodies);
 	}
 	//double t = omp_get_wtime() - tic;
 	//printf("");
