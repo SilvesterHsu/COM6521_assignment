@@ -122,7 +122,6 @@ int main(int argc, char* argv[]) {
 		omp_set_num_threads(omp_get_max_threads());
 
 	//Allocate any heap memory
-	int size = sizeof(struct nbody) * args.n;
 	h_bodies = (struct nbody*) malloc(sizeof(struct nbody) * args.n);
 	heat_map = (float*)malloc(sizeof(float) * args.d * args.d);
 	if (args.m == CUDA) {
@@ -177,8 +176,8 @@ int main(int argc, char* argv[]) {
 			//checkCUDAErrors("Device transfer to host");
 
 			cudaEventElapsedTime(&milliseconds_total, start, stop);
-			int seconds = milliseconds_total / CLOCKS_PER_SEC;
-			int milliseconds = (milliseconds_total - seconds * CLOCKS_PER_SEC);
+			int seconds = (int) (milliseconds_total / CLOCKS_PER_SEC);
+			int milliseconds = (int) (milliseconds_total - seconds * CLOCKS_PER_SEC);
 			printf("Execution time %d seconds %d milliseconds\n", seconds, milliseconds);
 			cudaEventDestroy(start);
 			cudaEventDestroy(stop);
@@ -226,9 +225,7 @@ void step(void)
 	for (unsigned int i = 0; i < args.iter; i++) {
 		if (args.m == CUDA) {
 			compute_volocity_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies,args.n);
-			cudaThreadSynchronize();
 			update_location_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies,args.n);
-			cudaThreadSynchronize();
 			if (args.visualisation == TRUE) {
 				cudaMemset(d_heat_map, 0, sizeof(float) * args.d * args.d);
 				update_heat_map_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies, d_heat_map, args.n, args.d);
@@ -257,7 +254,7 @@ void print_help() {
 	printf("\t[-f input_file]  Optionally specifies an input file with an initial N bodies of data. If not specified random data will be created.\n");
 }
 
-void raise_error(char* error_message, boolean print_msg, int exit_type) {
+void raise_error(const char* error_message, boolean print_msg, int exit_type) {
 	/*------------------------------------------------------
 	When encounters an error, the scheduled output will be
 	displayed and the program will exit.
@@ -395,18 +392,17 @@ void read_file(struct argument args, struct nbody* bodies) {
 			//printf("%s", buff);
 			char* token;
 			char delims[] = ",";
-			char* tokenremain = buff;
 			float* body_member = (float*)&bodies[file_index++];
 			int i = 0;
 
 			for (token = strtok(buff, delims); i < 5; token = strtok(NULL, delims)) {
 				//printf("%s\n", token);
 				if (token != NULL && strlen(token) > 1)
-					*(body_member + i++) = atof(token);
+					*(body_member + i++) = (float) atof(token);
 				else {
-					if (i == 0 || i == 1) *(body_member + i++) = (float)rand() / 0x8000;
+					if (i == 0 || i == 1) *(body_member + i++) = (float)(rand() / 0x8000);
 					else if (i == 2 || i == 3) *(body_member + i++) = 0.0;
-					else *(body_member + i++) = 1.0 / args.n;
+					else *(body_member + i++) = (float) (1.0 / args.n);
 				}
 			}
 		}
@@ -434,7 +430,7 @@ void generate_data(struct argument args, struct nbody* bodies) {
 		for (int i = 0; i < 5;) {
 			if (i == 0 || i == 1) *(body_member + i++) = (float)rand() / 0x8000;
 			else if (i == 2 || i == 3) *(body_member + i++) = 0.0;
-			else *(body_member + i++) = 1.0 / args.n;
+			else *(body_member + i++) = (float)(1.0 / args.n);
 		}
 	}
 }
@@ -507,7 +503,7 @@ void compute_volocity(struct nbody* bodies, float time_step, struct argument arg
 		//omp_set_nested(1);
 		int i;
 #pragma omp parallel for schedule(dynamic,2)
-		for (i = 0; i < args.n; i++) {
+		for (i = 0; i < (int)args.n; i++) {
 			struct point acceleration = calculate_single_body_acceleration(bodies, i, args);
 			(bodies + i)->vx += acceleration.x * time_step;
 			(bodies + i)->vy += acceleration.y * time_step;
@@ -541,7 +537,7 @@ void update_location(struct nbody* bodies, float time_step, struct argument args
 	else if (args.m == OPENMP) {
 		int i;
 #pragma omp parallel for schedule(dynamic,2)
-		for (i = 0; i < args.n; i++) {
+		for (i = 0; i < (int)args.n; i++) {
 			(bodies + i)->x += (bodies + i)->vx * time_step;
 			(bodies + i)->y += (bodies + i)->vy * time_step;
 		}
@@ -562,7 +558,7 @@ void update_heat_map(float* heat_map, struct nbody* bodies, struct argument args
 		void
 	--------------------------------------------------------*/
 
-	float grid_length = 1.0 / args.d;
+	float grid_length = (float)(1.0 / args.d);
 	if (args.m == CPU) {
 		// Initial heat map
 		for (unsigned int i = 0; i < args.d * args.d; i++)
@@ -584,11 +580,11 @@ void update_heat_map(float* heat_map, struct nbody* bodies, struct argument args
 		// Initial heat map
 		int i;
 #pragma omp parallel for schedule(dynamic,2)
-		for (i = 0; i < args.d * args.d; i++)
+		for (i = 0; i < (int)(args.d * args.d); i++)
 			*(heat_map + i) = 0.0;
 		// Iterate over all data points
 #pragma omp parallel for
-		for (i = 0; i < args.n; i++) {
+		for (i = 0; i < (int) args.n; i++) {
 			struct point body_location = { (bodies + i)->x, (bodies + i)->y };
 			if (!(body_location.x < 0 || body_location.x>1 || body_location.y < 0 || body_location.y>1)) {
 				int row = (int)(body_location.x / grid_length);
@@ -600,7 +596,7 @@ void update_heat_map(float* heat_map, struct nbody* bodies, struct argument args
 		}
 		// Normalize heat
 #pragma omp parallel for schedule(dynamic,2)
-		for (i = 0; i < args.d * args.d; i++)
+		for (i = 0; i < (int) (args.d * args.d); i++)
 			*(heat_map + i) = *(heat_map + i) / args.n * args.d;
 	}
 }
