@@ -10,6 +10,8 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
+#define _CRT_SECURE_NO_DEPRECATE
+
 #define USER_NAME "elt18sx"		//replace with your username
 
 #define FILE_CACHE_SIZE 255		//cache used to store one line content while reading file
