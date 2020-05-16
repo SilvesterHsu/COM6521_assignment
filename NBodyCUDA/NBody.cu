@@ -100,6 +100,37 @@ __global__ void update_location_CUDA(struct nbody* bodies) {
 	}
 }
 
+__global__ void compute_volocity_CUDA_shared(struct nbody* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	__shared__ float3 shared_bodies[THREADS_PER_BLOCK];
+	struct nbody* target_bodies = bodies + index;
+	struct point acceleration = { 0,0 };
+
+	for (int block_index = 0; block_index < gridDim.x; block_index++) {
+		int index_in_block = block_index * THREADS_PER_BLOCK + threadIdx.x;
+		if (index_in_block < N) {
+			struct nbody* external_body = bodies + index_in_block;
+			shared_bodies[threadIdx.x] = make_float3(external_body->x, external_body->y, external_body->m);
+		}
+		__syncthreads();
+		for (int i = 0; i < THREADS_PER_BLOCK; i++) {
+			if (i != index) {
+				float x_diff = shared_bodies[i].x - target_bodies->x;
+				float y_diff = shared_bodies[i].y - target_bodies->y;
+				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
+				float temp = G * shared_bodies[i].z / (sqrt(r) * r);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
+			}
+		}
+		__syncthreads();
+	}
+	if (index < N) {
+		target_bodies->vx += acceleration.x * dt;
+		target_bodies->vy += acceleration.y * dt;
+	}
+}
+
 __global__ void update_heat_map_CUDA(struct nbody* bodies, float* heat_map)
 {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -228,7 +259,8 @@ void step(void)
 	int block = (args.n % THREADS_PER_BLOCK == 0) ? args.n / THREADS_PER_BLOCK : args.n / THREADS_PER_BLOCK + 1;
 	for (unsigned int i = 0; i < args.iter; i++) {
 		if (args.m == CUDA) {
-			compute_volocity_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
+			//compute_volocity_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
+			compute_volocity_CUDA_shared << <block, THREADS_PER_BLOCK >> > (d_bodies);
 			update_location_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
 			if (args.visualisation == TRUE) {
 				cudaMemset(d_heat_map, 0, sizeof(float) * args.d * args.d);
