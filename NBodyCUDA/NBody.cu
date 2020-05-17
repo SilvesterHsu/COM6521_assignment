@@ -23,7 +23,7 @@ typedef enum Memory { global, constant, shared } Memory;
 typedef enum DataStructure { AoS, SoA } DataStructure;
 
 Memory mem = global;
-DataStructure data_structure = SoA;
+DataStructure data_structure = AoS;
 /*--------------------------------------------------------*/
 
 struct argument {
@@ -441,8 +441,9 @@ void step(void)
 
 	float time_step = dt;
 	int block = (args.n % THREADS_PER_BLOCK == 0) ? args.n / THREADS_PER_BLOCK : args.n / THREADS_PER_BLOCK + 1;
-	for (unsigned int i = 0; i < args.iter; i++) {
-		if (args.m == CUDA && data_structure == AoS) {
+	
+	if (args.m == CUDA && data_structure == AoS) {
+		for (unsigned int i = 0; i < args.iter; i++) {
 			if (mem == global)
 				compute_volocity_CUDA_AoS_global << <block, THREADS_PER_BLOCK >> > (d_bodies_AoS);
 			else if (mem == constant)
@@ -455,7 +456,9 @@ void step(void)
 				update_heat_map_CUDA_AoS << <block, THREADS_PER_BLOCK >> > (d_bodies_AoS, d_heat_map);
 			}
 		}
-		else if (args.m == CUDA && data_structure == SoA) {
+	}
+	else if (args.m == CUDA && data_structure == SoA) {
+		for (unsigned int i = 0; i < args.iter; i++) {
 			if (mem == global)
 				compute_volocity_CUDA_SoA_global << <block, THREADS_PER_BLOCK >> > (d_bodies_SoA);
 			else if (mem == constant)
@@ -468,7 +471,9 @@ void step(void)
 				update_heat_map_CUDA_SoA << <block, THREADS_PER_BLOCK >> > (d_bodies_SoA, d_heat_map);
 			}
 		}
-		else {
+	}
+	else {
+		for (unsigned int i = 0; i < args.iter; i++) {
 			compute_volocity(h_bodies, time_step, args);
 			#pragma omp barrier
 			update_location(h_bodies, time_step, args);
