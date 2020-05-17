@@ -328,7 +328,7 @@ int main(int argc, char* argv[]) {
 
 		if (mem == constant) {
 			float h_m[CONSTANT_SIZE];
-			for (int i = 0; i < args.n; i++) {
+			for (unsigned int i = 0; i < args.n; i++) {
 				h_m[i] = (h_bodies + i)->m;
 			}
 			cudaMemcpyToSymbol(d_m, h_m, sizeof(float) * CONSTANT_SIZE);
