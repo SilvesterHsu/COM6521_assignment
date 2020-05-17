@@ -53,26 +53,31 @@ void update_heat_map(float* heat_map, struct nbody* bodies, struct argument args
 void checkCUDAErrors(const char* msg);
 
 struct argument args;
-struct nbody* h_bodies;
-struct nbody* d_bodies;
+struct nbody* h_bodies_read;
+//struct nbody* d_bodies;
+static float* x;
+static float* y;
+static float* vx;
+static float* vy;
+static float* m;
+static struct nbody_soa d_bodies_struct;
+static struct nbody_soa* d_bodies;
 float* heat_map;
 float* d_heat_map;
 
 __device__ unsigned int N;
 __device__ unsigned int D;
 
-__device__ struct point calculate_single_body_acceleration_CUDA(struct nbody* bodies) {
+__device__ struct point calculate_single_body_acceleration_CUDA(struct nbody_soa* bodies) {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	struct point acceleration = { 0,0 };
 	if (index < N) {
-		struct nbody* target_bodies = bodies + index;
 		for (unsigned int i = 0; i < N; i++) {
-			struct nbody* external_body = bodies + i;
 			if (i != index) {
-				float x_diff = external_body->x - target_bodies->x;
-				float y_diff = external_body->y - target_bodies->y;
+				float x_diff = bodies->x[i] - bodies->x[index];
+				float y_diff = bodies->y[i] - bodies->y[index];
 				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
-				float temp = G * external_body->m / (sqrt(r) * r);
+				float temp = G * bodies->m[i] / (sqrt(r) * r);
 				acceleration.x += temp * x_diff;
 				acceleration.y += temp * y_diff;
 			}
@@ -81,31 +86,58 @@ __device__ struct point calculate_single_body_acceleration_CUDA(struct nbody* bo
 	return acceleration;
 }
 
-__global__ void compute_volocity_CUDA(struct nbody* bodies) {
+__global__ void compute_volocity_CUDA(struct nbody_soa* bodies) {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		struct point acceleration = calculate_single_body_acceleration_CUDA(bodies);
-		struct nbody* target_bodies = bodies + index;
-		target_bodies->vx += acceleration.x * dt;
-		target_bodies->vy += acceleration.y * dt;
+		bodies->vx[index] += acceleration.x * dt;
+		bodies->vy[index] += acceleration.y * dt;
 	}
 }
 
-__global__ void update_location_CUDA(struct nbody* bodies) {
+__global__ void compute_volocity_CUDA_shared(struct nbody_soa* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	__shared__ float3 shared_bodies[THREADS_PER_BLOCK];
+	float2 target_bodies = make_float2(bodies->x[index],bodies->y[index]);
+	struct point acceleration = { 0,0 };
+
+	for (int block_index = 0; block_index < gridDim.x; block_index++) {
+		int index_in_block = block_index * THREADS_PER_BLOCK + threadIdx.x;
+		if (index_in_block < N)
+			shared_bodies[threadIdx.x] = make_float3(bodies->x[index_in_block], bodies->y[index_in_block], bodies->m[index_in_block]);
+		__syncthreads();
+		for (int i = 0; i < THREADS_PER_BLOCK; i++) {
+			if (i != index) {
+				float x_diff = shared_bodies[i].x - target_bodies.x;
+				float y_diff = shared_bodies[i].y - target_bodies.y;
+				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
+				float temp = G * shared_bodies[i].z / (sqrt(r) * r);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
+			}
+		}
+		__syncthreads();
+	}
+	if (index < N) {
+		bodies->vx[index] += acceleration.x * dt;
+		bodies->vy[index] += acceleration.y * dt;
+	}
+}
+
+__global__ void update_location_CUDA(struct nbody_soa* bodies) {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
-		struct nbody* target_bodies = bodies + index;
-		target_bodies->x += target_bodies->vx * dt;
-		target_bodies->y += target_bodies->vy * dt;
+		bodies->x[index] += bodies->vx[index] * dt;
+		bodies->y[index] += bodies->vy[index] * dt;
 	}
 }
 
-__global__ void update_heat_map_CUDA(struct nbody* bodies, float* heat_map)
+__global__ void update_heat_map_CUDA(struct nbody_soa* bodies, float* heat_map)
 {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		float grid_length = 1.0 / D;
-		struct point body_location = { (bodies + index)->x, (bodies + index)->y };
+		struct point body_location = { bodies->x[index], bodies->y[index] };
 		if (!(body_location.x < 0 || body_location.x>1 || body_location.y < 0 || body_location.y>1)) {
 			int row = (int)(body_location.x / grid_length);
 			int line = (int)(body_location.y / grid_length);
@@ -123,22 +155,49 @@ int main(int argc, char* argv[]) {
 		omp_set_num_threads(omp_get_max_threads());
 
 	//Allocate any heap memory
-	h_bodies = (struct nbody*) malloc(sizeof(struct nbody) * args.n);
+	h_bodies_read = (struct nbody*) malloc(sizeof(struct nbody) * args.n);
+	x = (float*)malloc(sizeof(float*) * args.n);
+	y = (float*)malloc(sizeof(float*) * args.n);
+	vx = (float*)malloc(sizeof(float*) * args.n);
+	vy = (float*)malloc(sizeof(float*) * args.n);
+	m = (float*)malloc(sizeof(float*) * args.n);
 	heat_map = (float*)malloc(sizeof(float) * args.d * args.d);
 	if (args.m == CUDA) {
-		cudaMalloc((void**)&d_bodies, sizeof(struct nbody) * args.n);
+		// SoA data
+		cudaMalloc((void**)&d_bodies, sizeof(struct nbody_soa)); // SoA
+		cudaMalloc((void**)&d_bodies_struct.x, sizeof(float) * args.n);
+		cudaMalloc((void**)&d_bodies_struct.y, sizeof(float) * args.n);
+		cudaMalloc((void**)&d_bodies_struct.vx, sizeof(float) * args.n);
+		cudaMalloc((void**)&d_bodies_struct.vy, sizeof(float) * args.n);
+		cudaMalloc((void**)&d_bodies_struct.m, sizeof(float) * args.n);
 		cudaMalloc((void**)&d_heat_map, sizeof(float) * args.d * args.d);
 	}
 
 	//Depending on program arguments, either read initial data from file or generate random data.
 	if (args.input_file != NULL)
-		read_file(args, h_bodies);
+		read_file(args, h_bodies_read);
 	else
-		generate_data(args, h_bodies);
+		generate_data(args, h_bodies_read);
+
+	//Convert data from Aos into SoA
+	for (unsigned int i = 0; i < args.n; i++) {
+		struct nbody* h_bodies_i = h_bodies_read + i;
+		x[i] = h_bodies_i->x;
+		y[i] = h_bodies_i->y;
+		vx[i] = h_bodies_i->vx;
+		vy[i] = h_bodies_i->vy;
+		m[i] = h_bodies_i->m;
+	}
+	free(h_bodies_read);
 
 	//Allocate CUDA memory & copy data
 	if (args.m == CUDA) {
-		cudaMemcpy(d_bodies, h_bodies, sizeof(struct nbody) * args.n, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_bodies_struct.x, x, sizeof(float) * args.n, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_bodies_struct.y, y, sizeof(float) * args.n, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_bodies_struct.vx, vx, sizeof(float) * args.n, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_bodies_struct.vy, vy, sizeof(float) * args.n, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_bodies_struct.m, m, sizeof(float) * args.n, cudaMemcpyHostToDevice);
+		cudaMemcpy(d_bodies, &d_bodies_struct, sizeof(nbody_soa), cudaMemcpyHostToDevice);
 
 		cudaMemcpyToSymbol(N, &args.n, sizeof(unsigned int));
 		cudaMemcpyToSymbol(D, &args.d, sizeof(unsigned int));
@@ -153,12 +212,13 @@ int main(int argc, char* argv[]) {
 		//initViewer(args.n, args.d, args.m, &step);
 		initViewer(args.n, args.d, args.m, (*step));
 		if (args.m == CUDA) {
-			setNBodyPositions(d_bodies);
+			//setNBodyPositions(d_bodies);
+			setNBodyPositions2f((&d_bodies_struct)->x, (&d_bodies_struct)->y);
 			//setHistogramData(d_heat_map);
 			setActivityMapData(d_heat_map);
 		}
 		else {
-			setNBodyPositions(h_bodies);
+			//setNBodyPositions(h_bodies);
 			//setHistogramData(d_heat_map);
 			setActivityMapData(heat_map);
 		}
@@ -196,10 +256,15 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
-	free(h_bodies);
+	//free(h_bodies);
 	free(heat_map);
 	if (args.m == CUDA) {
 		cudaFree(d_bodies);
+		cudaFree(d_bodies_struct.x);
+		cudaFree(d_bodies_struct.y);
+		cudaFree(d_bodies_struct.vx);
+		cudaFree(d_bodies_struct.vy);
+		cudaFree(d_bodies_struct.m);
 		cudaFree(d_heat_map);
 		checkCUDAErrors("CUDA cleanup");
 	}
@@ -228,7 +293,8 @@ void step(void)
 	int block = (args.n % THREADS_PER_BLOCK == 0) ? args.n / THREADS_PER_BLOCK : args.n / THREADS_PER_BLOCK + 1;
 	for (unsigned int i = 0; i < args.iter; i++) {
 		if (args.m == CUDA) {
-			compute_volocity_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
+			//compute_volocity_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
+			compute_volocity_CUDA_shared << <block, THREADS_PER_BLOCK >> > (d_bodies);
 			update_location_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
 			if (args.visualisation == TRUE) {
 				cudaMemset(d_heat_map, 0, sizeof(float) * args.d * args.d);
@@ -236,13 +302,13 @@ void step(void)
 			}
 		}
 		else {
-			compute_volocity(h_bodies, time_step, args);
-			#pragma omp barrier
-			update_location(h_bodies, time_step, args);
-			if (args.visualisation == TRUE) {
-				memset(heat_map, 0, sizeof(float) * args.d * args.d);
-				update_heat_map(heat_map, h_bodies, args);
-			}
+			//compute_volocity(h_bodies, time_step, args);
+			//#pragma omp barrier
+			//update_location(h_bodies, time_step, args);
+			//if (args.visualisation == TRUE) {
+			//	memset(heat_map, 0, sizeof(float) * args.d * args.d);
+			//	update_heat_map(heat_map, h_bodies, args);
+			printf("");
 		}
 	}
 }
