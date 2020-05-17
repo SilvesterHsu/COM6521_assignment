@@ -16,6 +16,7 @@
 
 #define FILE_CACHE_SIZE 255		//cache used to store one line content while reading file
 #define THREADS_PER_BLOCK 1024
+#define CONSTANT_SIZE 2048
 
 struct argument {
 	// Arguments to store essential parameters, such
@@ -60,6 +61,7 @@ float* d_heat_map;
 
 __device__ unsigned int N;
 __device__ unsigned int D;
+__constant__ float d_m[CONSTANT_SIZE];
 
 __device__ struct point calculate_single_body_acceleration_CUDA(struct nbody* bodies) {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -72,7 +74,7 @@ __device__ struct point calculate_single_body_acceleration_CUDA(struct nbody* bo
 				float x_diff = external_body->x - target_bodies->x;
 				float y_diff = external_body->y - target_bodies->y;
 				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
-				float temp = G * external_body->m / (sqrt(r) * r);
+				float temp = G * d_m[i] / (sqrt(r) * r);
 				acceleration.x += temp * x_diff;
 				acceleration.y += temp * y_diff;
 			}
@@ -171,6 +173,13 @@ int main(int argc, char* argv[]) {
 	if (args.m == CUDA) {
 		cudaMemcpy(d_bodies, h_bodies, sizeof(struct nbody) * args.n, cudaMemcpyHostToDevice);
 
+		float h_m[CONSTANT_SIZE];
+		for (int i = 0; i < args.n; i++) {
+			h_m[i] = (h_bodies + i)->m;
+
+		}
+		//cudaMemcpyToSymbol(d_m, h_m, sizeof(float) * args.n);
+		cudaMemcpyToSymbol(d_m, h_m, sizeof(float) * CONSTANT_SIZE);
 		cudaMemcpyToSymbol(N, &args.n, sizeof(unsigned int));
 		cudaMemcpyToSymbol(D, &args.d, sizeof(unsigned int));
 
@@ -259,8 +268,8 @@ void step(void)
 	int block = (args.n % THREADS_PER_BLOCK == 0) ? args.n / THREADS_PER_BLOCK : args.n / THREADS_PER_BLOCK + 1;
 	for (unsigned int i = 0; i < args.iter; i++) {
 		if (args.m == CUDA) {
-			//compute_volocity_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
-			compute_volocity_CUDA_shared << <block, THREADS_PER_BLOCK >> > (d_bodies);
+			compute_volocity_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
+			//compute_volocity_CUDA_shared << <block, THREADS_PER_BLOCK >> > (d_bodies);
 			update_location_CUDA << <block, THREADS_PER_BLOCK >> > (d_bodies);
 			if (args.visualisation == TRUE) {
 				cudaMemset(d_heat_map, 0, sizeof(float) * args.d * args.d);
