@@ -15,15 +15,16 @@
 #define USER_NAME "elt18sx"		//replace with your username
 
 #define FILE_CACHE_SIZE 255		//cache used to store one line content while reading file
-#define THREADS_PER_BLOCK 1024
+#define THREADS_PER_BLOCK 1024 //threads per block
 #define CONSTANT_SIZE 64*1024/4
 
 /*------------- Set Parameters for Comparesion -------------*/
 typedef enum Memory { global, constant, shared } Memory;
 typedef enum DataStructure { AoS, SoA } DataStructure;
 
-Memory mem = shared;
-DataStructure data_structure = AoS;
+// here I use AoS + shared cache
+Memory mem = shared; // Cache method,could be any one in { global, constant, shared }
+DataStructure data_structure = AoS; // Data Structure, could be any one in { AoS, SoA }
 /*--------------------------------------------------------*/
 
 struct argument {
@@ -81,9 +82,9 @@ struct nbody* h_bodies;
 float* heat_map;
 float* d_heat_map;
 
-// ---- AoS ----
+// ---- variables for AoS ----
 struct nbody* d_bodies_AoS;
-// ---- SoA ----
+// ---- variables for SoA ----
 static float* x;
 static float* y;
 static float* vx;
@@ -91,13 +92,12 @@ static float* vy;
 static float* m;
 static struct nbody_soa d_bodies_struct_SoA;
 static struct nbody_soa* d_bodies_SoA;
-// -------------
+// ---------------------------
 
+// CUDA variables
 __device__ unsigned int N;
 __device__ unsigned int D;
 __constant__ float d_m[CONSTANT_SIZE];
-
-
 
 
 int main(int argc, char* argv[]) {
@@ -108,16 +108,18 @@ int main(int argc, char* argv[]) {
 	if (args.m == OPENMP)
 		omp_set_num_threads(omp_get_max_threads());
 
-	//Allocate any heap memory
+	//Allocate memory
 	h_bodies = (struct nbody*) malloc(sizeof(struct nbody) * args.n);
 	heat_map = (float*)malloc(sizeof(float) * args.d * args.d);
 	if (data_structure == AoS) {
+		//Allocate memory for AoS
 		if (args.m == CUDA) {
 			cudaMalloc((void**)&d_bodies_AoS, sizeof(struct nbody) * args.n);
 			cudaMalloc((void**)&d_heat_map, sizeof(float) * args.d * args.d);
 		}
 	}
 	else {
+		//Allocate memory for SoA
 		x = (float*)malloc(sizeof(float*) * args.n);
 		y = (float*)malloc(sizeof(float*) * args.n);
 		vx = (float*)malloc(sizeof(float*) * args.n);
@@ -155,6 +157,7 @@ int main(int argc, char* argv[]) {
 	//Allocate CUDA memory & copy data
 	if (args.m == CUDA) {
 
+		// Constant cache
 		if (mem == constant) {
 			float h_m[CONSTANT_SIZE];
 			for (unsigned int i = 0; i < args.n; i++) {
@@ -164,9 +167,11 @@ int main(int argc, char* argv[]) {
 		}
 
 		if (data_structure == AoS) {
+			// Copy data to AoS
 			cudaMemcpy(d_bodies_AoS, h_bodies, sizeof(struct nbody) * args.n, cudaMemcpyHostToDevice);
 		}
 		else {
+			// Copy data to SoA
 			cudaMemcpy(d_bodies_struct_SoA.x, x, sizeof(float) * args.n, cudaMemcpyHostToDevice);
 			cudaMemcpy(d_bodies_struct_SoA.y, y, sizeof(float) * args.n, cudaMemcpyHostToDevice);
 			cudaMemcpy(d_bodies_struct_SoA.vx, vx, sizeof(float) * args.n, cudaMemcpyHostToDevice);
@@ -684,6 +689,12 @@ void checkCUDAErrors(const char* msg)
 
 /*------------- Kernel for AoS data structure -------------*/
 __global__ void compute_volocity_CUDA_AoS_global(struct nbody* bodies) {
+	/*------------------------------------------------------
+	AoS + global cache:
+	Calculate the volocity for bodies according to their
+	accelerate.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		struct point acceleration = { 0,0 };
@@ -705,6 +716,12 @@ __global__ void compute_volocity_CUDA_AoS_global(struct nbody* bodies) {
 }
 
 __global__ void compute_volocity_CUDA_AoS_constant(struct nbody* bodies) {
+	/*------------------------------------------------------
+	AoS + constant cache:
+	Calculate the volocity for bodies according to their
+	accelerate.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		struct point acceleration = { 0,0 };
@@ -726,6 +743,12 @@ __global__ void compute_volocity_CUDA_AoS_constant(struct nbody* bodies) {
 }
 
 __global__ void compute_volocity_CUDA_AoS_shared(struct nbody* bodies) {
+	/*------------------------------------------------------
+	AoS + shared cache:
+	Calculate the volocity for bodies according to their
+	accelerate.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	__shared__ float3 shared_bodies[THREADS_PER_BLOCK];
 	struct nbody* target_bodies = bodies + index;
@@ -757,6 +780,11 @@ __global__ void compute_volocity_CUDA_AoS_shared(struct nbody* bodies) {
 }
 
 __global__ void update_location_CUDA_AoS(struct nbody* bodies) {
+	/*------------------------------------------------------
+	Calculate the new location for bodies according to their
+	present location and speed.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		struct nbody* target_bodies = bodies + index;
@@ -765,8 +793,11 @@ __global__ void update_location_CUDA_AoS(struct nbody* bodies) {
 	}
 }
 
-__global__ void update_heat_map_CUDA_AoS(struct nbody* bodies, float* heat_map)
-{
+__global__ void update_heat_map_CUDA_AoS(struct nbody* bodies, float* heat_map){
+	/*------------------------------------------------------
+	Calculate the heat map based on present bodies.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		float grid_length = 1.0 / D;
@@ -782,6 +813,12 @@ __global__ void update_heat_map_CUDA_AoS(struct nbody* bodies, float* heat_map)
 
 /*------------- Kernel for SoA data structure -------------*/
 __global__ void compute_volocity_CUDA_SoA_global(struct nbody_soa* bodies) {
+	/*------------------------------------------------------
+	SoA + global cache:
+	Calculate the volocity for bodies according to their
+	accelerate.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		struct point acceleration = { 0,0 };
@@ -801,6 +838,12 @@ __global__ void compute_volocity_CUDA_SoA_global(struct nbody_soa* bodies) {
 }
 
 __global__ void compute_volocity_CUDA_SoA_constant(struct nbody_soa* bodies) {
+	/*------------------------------------------------------
+	SoA + constant cache:
+	Calculate the volocity for bodies according to their
+	accelerate.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		struct point acceleration = { 0,0 };
@@ -820,6 +863,12 @@ __global__ void compute_volocity_CUDA_SoA_constant(struct nbody_soa* bodies) {
 }
 
 __global__ void compute_volocity_CUDA_SoA_shared(struct nbody_soa* bodies) {
+	/*------------------------------------------------------
+	SoA + shared cache:
+	Calculate the volocity for bodies according to their
+	accelerate.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	__shared__ float3 shared_bodies[THREADS_PER_BLOCK];
 	float2 target_bodies = make_float2(bodies->x[index], bodies->y[index]);
@@ -849,6 +898,11 @@ __global__ void compute_volocity_CUDA_SoA_shared(struct nbody_soa* bodies) {
 }
 
 __global__ void update_location_CUDA_SoA(struct nbody_soa* bodies) {
+	/*------------------------------------------------------
+	Calculate the new location for bodies according to their
+	present location and speed.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		bodies->x[index] += bodies->vx[index] * dt;
@@ -856,8 +910,11 @@ __global__ void update_location_CUDA_SoA(struct nbody_soa* bodies) {
 	}
 }
 
-__global__ void update_heat_map_CUDA_SoA(struct nbody_soa* bodies, float* heat_map)
-{
+__global__ void update_heat_map_CUDA_SoA(struct nbody_soa* bodies, float* heat_map){
+	/*------------------------------------------------------
+	Calculate the heat map based on present bodies.
+	--------------------------------------------------------*/
+
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
 	if (index < N) {
 		float grid_length = 1.0 / D;
