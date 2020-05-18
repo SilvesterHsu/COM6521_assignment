@@ -18,11 +18,11 @@
 #define THREADS_PER_BLOCK 1024
 #define CONSTANT_SIZE 64*1024/4
 
-/*------------- Set parameters for comparesion -------------*/
+/*------------- Set Parameters for Comparesion -------------*/
 typedef enum Memory { global, constant, shared } Memory;
 typedef enum DataStructure { AoS, SoA } DataStructure;
 
-Memory mem = global;
+Memory mem = shared;
 DataStructure data_structure = AoS;
 /*--------------------------------------------------------*/
 
@@ -60,15 +60,30 @@ void update_location(struct nbody* bodies, float time_step, struct argument args
 void update_heat_map(float* heat_map, struct nbody* bodies, struct argument args);
 
 void checkCUDAErrors(const char* msg);
+/*------------- Kernel for AoS data structure -------------*/
+__global__ void compute_volocity_CUDA_AoS_global(struct nbody* bodies);
+__global__ void compute_volocity_CUDA_AoS_constant(struct nbody* bodies);
+__global__ void compute_volocity_CUDA_AoS_shared(struct nbody* bodies);
+__global__ void update_location_CUDA_AoS(struct nbody* bodies);
+__global__ void update_heat_map_CUDA_AoS(struct nbody* bodies, float* heat_map);
+/*---------------------------------------------------------*/
+
+/*------------- Kernel for SoA data structure -------------*/
+__global__ void compute_volocity_CUDA_SoA_global(struct nbody_soa* bodies);
+__global__ void compute_volocity_CUDA_SoA_constant(struct nbody_soa* bodies);
+__global__ void compute_volocity_CUDA_SoA_shared(struct nbody_soa* bodies);
+__global__ void update_location_CUDA_SoA(struct nbody_soa* bodies);
+__global__ void update_heat_map_CUDA_SoA(struct nbody_soa* bodies, float* heat_map);
+/*---------------------------------------------------------*/
 
 struct argument args;
 struct nbody* h_bodies;
 float* heat_map;
 float* d_heat_map;
 
-// AoS
+// ---- AoS ----
 struct nbody* d_bodies_AoS;
-// SoA
+// ---- SoA ----
 static float* x;
 static float* y;
 static float* vx;
@@ -76,199 +91,13 @@ static float* vy;
 static float* m;
 static struct nbody_soa d_bodies_struct_SoA;
 static struct nbody_soa* d_bodies_SoA;
+// -------------
 
 __device__ unsigned int N;
 __device__ unsigned int D;
 __constant__ float d_m[CONSTANT_SIZE];
 
-/*------------- Kernel for AoS data structure -------------*/
-__global__ void compute_volocity_CUDA_AoS_global(struct nbody* bodies) {
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index < N) {
-		struct point acceleration = { 0,0 };
-		struct nbody* target_bodies = bodies + index;
-		for (unsigned int i = 0; i < N; i++) {
-			struct nbody* external_body = bodies + i;
-			if (i != index) {
-				float x_diff = external_body->x - target_bodies->x;
-				float y_diff = external_body->y - target_bodies->y;
-				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
-				float temp = G * target_bodies->m / (sqrt(r) * r);
-				acceleration.x += temp * x_diff;
-				acceleration.y += temp * y_diff;
-			}
-		}
-		target_bodies->vx += acceleration.x * dt;
-		target_bodies->vy += acceleration.y * dt;
-	}
-}
 
-__global__ void compute_volocity_CUDA_AoS_constant(struct nbody* bodies) {
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index < N) {
-		struct point acceleration = { 0,0 };
-		struct nbody* target_bodies = bodies + index;
-		for (unsigned int i = 0; i < N; i++) {
-			struct nbody* external_body = bodies + i;
-			if (i != index) {
-				float x_diff = external_body->x - target_bodies->x;
-				float y_diff = external_body->y - target_bodies->y;
-				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
-				float temp = G * d_m[i] / (sqrt(r) * r);
-				acceleration.x += temp * x_diff;
-				acceleration.y += temp * y_diff;
-			}
-		}
-		target_bodies->vx += acceleration.x * dt;
-		target_bodies->vy += acceleration.y * dt;
-	}
-}
-
-__global__ void compute_volocity_CUDA_AoS_shared(struct nbody* bodies) {
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	__shared__ float3 shared_bodies[THREADS_PER_BLOCK];
-	struct nbody* target_bodies = bodies + index;
-	struct point acceleration = { 0,0 };
-
-	for (int block_index = 0; block_index < gridDim.x; block_index++) {
-		int index_in_block = block_index * THREADS_PER_BLOCK + threadIdx.x;
-		if (index_in_block < N) {
-			struct nbody* external_body = bodies + index_in_block;
-			shared_bodies[threadIdx.x] = make_float3(external_body->x, external_body->y, external_body->m);
-		}
-		__syncthreads();
-		for (int i = 0; i < THREADS_PER_BLOCK; i++) {
-			if (i != index) {
-				float x_diff = shared_bodies[i].x - target_bodies->x;
-				float y_diff = shared_bodies[i].y - target_bodies->y;
-				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
-				float temp = G * shared_bodies[i].z / (sqrt(r) * r);
-				acceleration.x += temp * x_diff;
-				acceleration.y += temp * y_diff;
-			}
-		}
-		__syncthreads();
-	}
-	if (index < N) {
-		target_bodies->vx += acceleration.x * dt;
-		target_bodies->vy += acceleration.y * dt;
-	}
-}
-
-__global__ void update_location_CUDA_AoS(struct nbody* bodies) {
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index < N) {
-		struct nbody* target_bodies = bodies + index;
-		target_bodies->x += target_bodies->vx * dt;
-		target_bodies->y += target_bodies->vy * dt;
-	}
-}
-
-__global__ void update_heat_map_CUDA_AoS(struct nbody* bodies, float* heat_map)
-{
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index < N) {
-		float grid_length = 1.0 / D;
-		struct point body_location = { (bodies + index)->x, (bodies + index)->y };
-		if (!(body_location.x < 0 || body_location.x>1 || body_location.y < 0 || body_location.y>1)) {
-			int row = (int)(body_location.x / grid_length);
-			int line = (int)(body_location.y / grid_length);
-			atomicAdd((heat_map + line * D + row), (N * D <= 1000) ? (1.0 / N) : (1.0 * D / N));
-		}
-	}
-}
-/*---------------------------------------------------------*/
-
-/*------------- Kernel for SoA data structure -------------*/
-__global__ void compute_volocity_CUDA_SoA_global(struct nbody_soa* bodies) {
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index < N) {
-		struct point acceleration = { 0,0 };
-		for (unsigned int i = 0; i < N; i++) {
-			if (i != index) {
-				float x_diff = bodies->x[i] - bodies->x[index];
-				float y_diff = bodies->y[i] - bodies->y[index];
-				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
-				float temp = G * bodies->m[i] / (sqrt(r) * r);
-				acceleration.x += temp * x_diff;
-				acceleration.y += temp * y_diff;
-			}
-		}
-		bodies->vx[index] += acceleration.x * dt;
-		bodies->vy[index] += acceleration.y * dt;
-	}
-}
-
-__global__ void compute_volocity_CUDA_SoA_constant(struct nbody_soa* bodies) {
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index < N) {
-		struct point acceleration = { 0,0 };
-		for (unsigned int i = 0; i < N; i++) {
-			if (i != index) {
-				float x_diff = bodies->x[i] - bodies->x[index];
-				float y_diff = bodies->y[i] - bodies->y[index];
-				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
-				float temp = G * d_m[i] / (sqrt(r) * r);
-				acceleration.x += temp * x_diff;
-				acceleration.y += temp * y_diff;
-			}
-		}
-		bodies->vx[index] += acceleration.x * dt;
-		bodies->vy[index] += acceleration.y * dt;
-	}
-}
-
-__global__ void compute_volocity_CUDA_SoA_shared(struct nbody_soa* bodies) {
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	__shared__ float3 shared_bodies[THREADS_PER_BLOCK];
-	float2 target_bodies = make_float2(bodies->x[index], bodies->y[index]);
-	struct point acceleration = { 0,0 };
-
-	for (int block_index = 0; block_index < gridDim.x; block_index++) {
-		int index_in_block = block_index * THREADS_PER_BLOCK + threadIdx.x;
-		if (index_in_block < N)
-			shared_bodies[threadIdx.x] = make_float3(bodies->x[index_in_block], bodies->y[index_in_block], bodies->m[index_in_block]);
-		__syncthreads();
-		for (int i = 0; i < THREADS_PER_BLOCK; i++) {
-			if (i != index) {
-				float x_diff = shared_bodies[i].x - target_bodies.x;
-				float y_diff = shared_bodies[i].y - target_bodies.y;
-				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
-				float temp = G * shared_bodies[i].z / (sqrt(r) * r);
-				acceleration.x += temp * x_diff;
-				acceleration.y += temp * y_diff;
-			}
-		}
-		__syncthreads();
-	}
-	if (index < N) {
-		bodies->vx[index] += acceleration.x * dt;
-		bodies->vy[index] += acceleration.y * dt;
-	}
-}
-
-__global__ void update_location_CUDA_SoA(struct nbody_soa* bodies) {
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index < N) {
-		bodies->x[index] += bodies->vx[index] * dt;
-		bodies->y[index] += bodies->vy[index] * dt;
-	}
-}
-
-__global__ void update_heat_map_CUDA_SoA(struct nbody_soa* bodies, float* heat_map)
-{
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-	if (index < N) {
-		float grid_length = 1.0 / D;
-		struct point body_location = { bodies->x[index], bodies->y[index] };
-		if (!(body_location.x < 0 || body_location.x>1 || body_location.y < 0 || body_location.y>1)) {
-			int row = (int)(body_location.x / grid_length);
-			int line = (int)(body_location.y / grid_length);
-			atomicAdd((heat_map + line * D + row), (N * D <= 1000) ? (1.0 / N) : (1.0 * D / N));
-		}
-	}
-}
-/*---------------------------------------------------------*/
 
 
 int main(int argc, char* argv[]) {
@@ -852,3 +681,192 @@ void checkCUDAErrors(const char* msg)
 		exit(EXIT_FAILURE);
 	}
 }
+
+/*------------- Kernel for AoS data structure -------------*/
+__global__ void compute_volocity_CUDA_AoS_global(struct nbody* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		struct point acceleration = { 0,0 };
+		struct nbody* target_bodies = bodies + index;
+		for (unsigned int i = 0; i < N; i++) {
+			struct nbody* external_body = bodies + i;
+			if (i != index) {
+				float x_diff = external_body->x - target_bodies->x;
+				float y_diff = external_body->y - target_bodies->y;
+				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
+				float temp = G * target_bodies->m / (sqrt(r) * r);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
+			}
+		}
+		target_bodies->vx += acceleration.x * dt;
+		target_bodies->vy += acceleration.y * dt;
+	}
+}
+
+__global__ void compute_volocity_CUDA_AoS_constant(struct nbody* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		struct point acceleration = { 0,0 };
+		struct nbody* target_bodies = bodies + index;
+		for (unsigned int i = 0; i < N; i++) {
+			struct nbody* external_body = bodies + i;
+			if (i != index) {
+				float x_diff = external_body->x - target_bodies->x;
+				float y_diff = external_body->y - target_bodies->y;
+				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
+				float temp = G * d_m[i] / (sqrt(r) * r);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
+			}
+		}
+		target_bodies->vx += acceleration.x * dt;
+		target_bodies->vy += acceleration.y * dt;
+	}
+}
+
+__global__ void compute_volocity_CUDA_AoS_shared(struct nbody* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	__shared__ float3 shared_bodies[THREADS_PER_BLOCK];
+	struct nbody* target_bodies = bodies + index;
+	struct point acceleration = { 0,0 };
+
+	for (int block_index = 0; block_index < gridDim.x; block_index++) {
+		int index_in_block = block_index * THREADS_PER_BLOCK + threadIdx.x;
+		if (index_in_block < N) {
+			struct nbody* external_body = bodies + index_in_block;
+			shared_bodies[threadIdx.x] = make_float3(external_body->x, external_body->y, external_body->m);
+		}
+		__syncthreads();
+		for (int i = 0; i < THREADS_PER_BLOCK; i++) {
+			if (i != index) {
+				float x_diff = shared_bodies[i].x - target_bodies->x;
+				float y_diff = shared_bodies[i].y - target_bodies->y;
+				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
+				float temp = G * shared_bodies[i].z / (sqrt(r) * r);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
+			}
+		}
+		__syncthreads();
+	}
+	if (index < N) {
+		target_bodies->vx += acceleration.x * dt;
+		target_bodies->vy += acceleration.y * dt;
+	}
+}
+
+__global__ void update_location_CUDA_AoS(struct nbody* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		struct nbody* target_bodies = bodies + index;
+		target_bodies->x += target_bodies->vx * dt;
+		target_bodies->y += target_bodies->vy * dt;
+	}
+}
+
+__global__ void update_heat_map_CUDA_AoS(struct nbody* bodies, float* heat_map)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		float grid_length = 1.0 / D;
+		struct point body_location = { (bodies + index)->x, (bodies + index)->y };
+		if (!(body_location.x < 0 || body_location.x>1 || body_location.y < 0 || body_location.y>1)) {
+			int row = (int)(body_location.x / grid_length);
+			int line = (int)(body_location.y / grid_length);
+			atomicAdd((heat_map + line * D + row), (N * D <= 1000) ? (1.0 / N) : (1.0 * D / N));
+		}
+	}
+}
+/*---------------------------------------------------------*/
+
+/*------------- Kernel for SoA data structure -------------*/
+__global__ void compute_volocity_CUDA_SoA_global(struct nbody_soa* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		struct point acceleration = { 0,0 };
+		for (unsigned int i = 0; i < N; i++) {
+			if (i != index) {
+				float x_diff = bodies->x[i] - bodies->x[index];
+				float y_diff = bodies->y[i] - bodies->y[index];
+				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
+				float temp = G * bodies->m[i] / (sqrt(r) * r);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
+			}
+		}
+		bodies->vx[index] += acceleration.x * dt;
+		bodies->vy[index] += acceleration.y * dt;
+	}
+}
+
+__global__ void compute_volocity_CUDA_SoA_constant(struct nbody_soa* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		struct point acceleration = { 0,0 };
+		for (unsigned int i = 0; i < N; i++) {
+			if (i != index) {
+				float x_diff = bodies->x[i] - bodies->x[index];
+				float y_diff = bodies->y[i] - bodies->y[index];
+				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
+				float temp = G * d_m[i] / (sqrt(r) * r);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
+			}
+		}
+		bodies->vx[index] += acceleration.x * dt;
+		bodies->vy[index] += acceleration.y * dt;
+	}
+}
+
+__global__ void compute_volocity_CUDA_SoA_shared(struct nbody_soa* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	__shared__ float3 shared_bodies[THREADS_PER_BLOCK];
+	float2 target_bodies = make_float2(bodies->x[index], bodies->y[index]);
+	struct point acceleration = { 0,0 };
+
+	for (int block_index = 0; block_index < gridDim.x; block_index++) {
+		int index_in_block = block_index * THREADS_PER_BLOCK + threadIdx.x;
+		if (index_in_block < N)
+			shared_bodies[threadIdx.x] = make_float3(bodies->x[index_in_block], bodies->y[index_in_block], bodies->m[index_in_block]);
+		__syncthreads();
+		for (int i = 0; i < THREADS_PER_BLOCK; i++) {
+			if (i != index) {
+				float x_diff = shared_bodies[i].x - target_bodies.x;
+				float y_diff = shared_bodies[i].y - target_bodies.y;
+				float r = x_diff * x_diff + y_diff * y_diff + SOFTENING * SOFTENING;
+				float temp = G * shared_bodies[i].z / (sqrt(r) * r);
+				acceleration.x += temp * x_diff;
+				acceleration.y += temp * y_diff;
+			}
+		}
+		__syncthreads();
+	}
+	if (index < N) {
+		bodies->vx[index] += acceleration.x * dt;
+		bodies->vy[index] += acceleration.y * dt;
+	}
+}
+
+__global__ void update_location_CUDA_SoA(struct nbody_soa* bodies) {
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		bodies->x[index] += bodies->vx[index] * dt;
+		bodies->y[index] += bodies->vy[index] * dt;
+	}
+}
+
+__global__ void update_heat_map_CUDA_SoA(struct nbody_soa* bodies, float* heat_map)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index < N) {
+		float grid_length = 1.0 / D;
+		struct point body_location = { bodies->x[index], bodies->y[index] };
+		if (!(body_location.x < 0 || body_location.x>1 || body_location.y < 0 || body_location.y>1)) {
+			int row = (int)(body_location.x / grid_length);
+			int line = (int)(body_location.y / grid_length);
+			atomicAdd((heat_map + line * D + row), (N * D <= 1000) ? (1.0 / N) : (1.0 * D / N));
+		}
+	}
+}
+/*---------------------------------------------------------*/
